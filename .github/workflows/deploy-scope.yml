@@ -1,0 +1,59 @@
+name: deploy-scope
+
+# Runs from the BASE branch and never checks out the PR, so a PR cannot change
+# the check that judges it. It reads the PR over the API only.
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  deploy-scope:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const BOT = 'tosak-tag-bump[bot]';
+            const ALLOWED = new Set(['overlays/dev/kustomization.yaml']);
+            const CHANGED_LINE = /^[+-]\s*newTag:\s*\S+\s*$/;
+
+            const pr = context.payload.pull_request;
+            const repo = { owner: context.repo.owner, repo: context.repo.repo };
+            const faults = [];
+
+            if (pr.user.login !== BOT && pr.head.ref.startsWith('deploy/')) {
+              core.setFailed(`Branch ${pr.head.ref} is a deploy branch but the author is ${pr.user.login}, not ${BOT}.`);
+              return;
+            }
+            if (pr.user.login !== BOT) {
+              core.info(`Author ${pr.user.login} is not ${BOT}: not a deploy PR, nothing to limit.`);
+              return;
+            }
+            if (pr.head.repo.full_name !== pr.base.repo.full_name) {
+              faults.push('head branch is in a fork');
+            }
+
+            const commits = await github.paginate(github.rest.pulls.listCommits, { ...repo, pull_number: pr.number });
+            for (const c of commits) {
+              if (c.author?.login !== BOT) faults.push(`commit ${c.sha} author is ${c.author?.login ?? 'unknown'}`);
+              if (!c.commit.verification?.verified) faults.push(`commit ${c.sha} is not verified`);
+            }
+
+            const files = await github.paginate(github.rest.pulls.listFiles, { ...repo, pull_number: pr.number });
+            for (const f of files) {
+              if (!ALLOWED.has(f.filename)) { faults.push(`file ${f.filename} is not a listed overlay`); continue; }
+              if (f.status !== 'modified') { faults.push(`file ${f.filename} is ${f.status}`); continue; }
+              const lines = (f.patch ?? '').split('\n')
+                .filter(l => (l.startsWith('+') || l.startsWith('-')));
+              for (const l of lines) {
+                if (!CHANGED_LINE.test(l)) faults.push(`${f.filename}: changed line is not newTag: ${JSON.stringify(l)}`);
+              }
+              if (f.additions !== f.deletions) faults.push(`${f.filename}: ${f.additions} additions vs ${f.deletions} deletions`);
+            }
+
+            if (faults.length) core.setFailed(faults.join('\n'));
+            else core.info(`OK: ${files.length} file(s), only newTag: changed.`);
