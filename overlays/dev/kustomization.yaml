@@ -3,4 +3,4 @@ kind: Kustomization
 namespace: proof
 images:
   - name: stevetosak/proof
-    newTag: latest
+    newTag: test-1
