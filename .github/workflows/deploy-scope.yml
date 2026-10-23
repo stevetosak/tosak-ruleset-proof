@@ -25,19 +25,30 @@ jobs:
             const repo = { owner: context.repo.owner, repo: context.repo.repo };
             const faults = [];
 
+            const commits = await github.paginate(github.rest.pulls.listCommits, { ...repo, pull_number: pr.number });
+
             if (pr.user.login !== BOT && pr.head.ref.startsWith('deploy/')) {
               core.setFailed(`Branch ${pr.head.ref} is a deploy branch but the author is ${pr.user.login}, not ${BOT}.`);
               return;
             }
             if (pr.user.login !== BOT) {
-              core.info(`Author ${pr.user.login} is not ${BOT}: not a deploy PR, nothing to limit.`);
+              // A human PR may change anything, but only its author may have made
+              // its commits: any token with contents write can push to an open
+              // PR's branch, so a bot or a stolen token must not ride along.
+              for (const c of commits) {
+                const v = c.commit.verification;
+                if (!v?.verified) faults.push(`commit ${c.sha} is not verified (${v?.reason})`);
+                if (c.author?.login !== pr.user.login) faults.push(`commit ${c.sha} author is ${c.author?.login ?? 'unknown'}`);
+                if (c.committer?.login !== pr.user.login) faults.push(`commit ${c.sha} committer is ${c.committer?.login ?? 'unknown'}`);
+              }
+              if (faults.length) core.setFailed(faults.join('\n'));
+              else core.info(`OK: human PR, ${commits.length} commit(s) verified and made by ${pr.user.login}.`);
               return;
             }
             if (pr.head.repo.full_name !== pr.base.repo.full_name) {
               faults.push('head branch is in a fork');
             }
 
-            const commits = await github.paginate(github.rest.pulls.listCommits, { ...repo, pull_number: pr.number });
             for (const c of commits) {
               if (c.author?.login !== BOT) faults.push(`commit ${c.sha} author is ${c.author?.login ?? 'unknown'}`);
               if (!c.commit.verification?.verified) faults.push(`commit ${c.sha} is not verified`);

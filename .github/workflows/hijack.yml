@@ -1,0 +1,66 @@
+name: hijack
+
+# Plays a stolen App key: pushes a commit onto someone else's open PR branch,
+# pretending to be the operator. deploy-scope must fail on every mode.
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: Head branch of the human PR to push onto
+        required: true
+      mode:
+        description: git = git push with a faked author; api-author = contents API, author set to the operator; api-both = author and committer set to the operator
+        type: choice
+        options: [git, api-author, api-both]
+
+permissions: {}
+
+env:
+  OPERATOR_NAME: stevetosak
+  OPERATOR_EMAIL: 116950252+stevetosak@users.noreply.github.com
+
+jobs:
+  hijack:
+    runs-on: ubuntu-24.04
+    steps:
+      - id: app
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - if: inputs.mode == 'git'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+          token: ${{ steps.app.outputs.token }}
+
+      - if: inputs.mode == 'git'
+        run: |
+          git config user.name "$OPERATOR_NAME"
+          git config user.email "$OPERATOR_EMAIL"
+          echo "hijack git run ${{ github.run_number }}" >> README.md
+          git commit -qam "hijack: git push"
+          git push origin HEAD:"${{ inputs.branch }}"
+
+      - if: inputs.mode != 'git'
+        uses: actions/github-script@v7
+        env:
+          BRANCH: ${{ inputs.branch }}
+          MODE: ${{ inputs.mode }}
+        with:
+          github-token: ${{ steps.app.outputs.token }}
+          script: |
+            const repo = { owner: context.repo.owner, repo: context.repo.repo };
+            const branch = process.env.BRANCH;
+            const who = { name: process.env.OPERATOR_NAME, email: process.env.OPERATOR_EMAIL };
+            const cur = await github.rest.repos.getContent({ ...repo, path: 'README.md', ref: branch });
+            const text = Buffer.from(cur.data.content, 'base64').toString() + `\nhijack ${process.env.MODE} run ${context.runNumber}\n`;
+            const res = await github.rest.repos.createOrUpdateFileContents({
+              ...repo, path: 'README.md', branch, sha: cur.data.sha,
+              message: `hijack: ${process.env.MODE}`,
+              content: Buffer.from(text).toString('base64'),
+              author: who,
+              ...(process.env.MODE === 'api-both' ? { committer: who } : {}),
+            });
+            core.info(`commit ${res.data.commit.sha} verified=${res.data.commit.verification?.verified} reason=${res.data.commit.verification?.reason}`);
